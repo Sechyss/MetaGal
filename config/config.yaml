@@ -1,0 +1,85 @@
+# ── Pipeline configuration ────────────────────────────────────────────────────
+#
+# Copy this file, adjust the paths and parameters for your project,
+# then run:
+#
+#   python pipeline.py --config config/config.yaml
+#
+# All paths can be relative to the working directory or absolute.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Root directory for all pipeline outputs
+output_dir: results
+
+# Number of CPU threads available for tools that support parallelism
+threads: 4
+
+# ── Samples ───────────────────────────────────────────────────────────────────
+# Option A – inline list
+samples:
+  sample_01:
+    r1: data/raw/sample_01_R1.fastq.gz
+    r2: data/raw/sample_01_R2.fastq.gz
+  sample_02:
+    r1: data/raw/sample_02_R1.fastq.gz
+    r2: data/raw/sample_02_R2.fastq.gz
+
+# Option B – TSV manifest (comment out the inline list above and uncomment below)
+# samples: data/manifest.tsv   # columns: sample, r1, r2
+
+# ── Sample metadata ───────────────────────────────────────────────────────────
+# TSV file with sample identifiers as the first column.
+# Required for diversity plots and statistical tests.
+metadata: data/metadata.tsv
+
+# Metadata column to use for grouping samples in plots
+group_column: treatment
+
+# ── Steps to run ──────────────────────────────────────────────────────────────
+# Set any step to false to skip it.
+steps:
+  quality_control: true
+  trimming: true
+  denoising: true
+  taxonomy: true
+  diversity: true
+  visualisation: true
+
+# ── Primer trimming (cutadapt) ────────────────────────────────────────────────
+trimming:
+  # Built-in primer sets: 515F_806R (V4), 27F_338R (V1-V2), 341F_806R (V3-V4)
+  primer_set: 515F_806R
+
+  # Override with custom primers (leave empty to use primer_set above)
+  # forward_primer: GTGYCAGCMGCCGCGGTAA
+  # reverse_primer: GGACTACNVGGGTWTCTAAT
+
+  min_length: 100          # discard reads shorter than this after trimming
+  error_rate: 0.1          # maximum allowed primer mismatch rate
+  discard_untrimmed: true  # discard read pairs without detected primers
+
+# ── DADA2 denoising ───────────────────────────────────────────────────────────
+dada2:
+  trunc_len_f: 230   # truncate forward reads at this position
+  trunc_len_r: 200   # truncate reverse reads at this position
+
+# ── Taxonomic classification ──────────────────────────────────────────────────
+taxonomy:
+  # Method: vsearch (global alignment) or qiime2 (Naive Bayes classifier)
+  method: vsearch
+
+  # VSEARCH: path to a SILVA or GreenGenes FASTA database with taxonomy headers
+  database: data/silva_138_99_seqs.fasta
+
+  # VSEARCH: minimum identity for a hit to be accepted
+  identity: 0.97
+
+  # QIIME 2: path to pre-trained classifier artefact (.qza)
+  # classifier: data/silva-138-99-nb-classifier.qza
+
+# ── Visualisation ─────────────────────────────────────────────────────────────
+# Taxonomic level for relative abundance bar chart
+taxonomy_level: Phylum   # Domain, Phylum, Class, Order, Family, Genus, Species
+
+# Number of top taxa to show (remainder merged into "Other")
+top_n_taxa: 10

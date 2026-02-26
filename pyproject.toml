@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metagal"
+version = "1.0.0"
+description = "16S metabarcode analysis pipeline"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [
+  { name = "Sechyss" }
+]
+dependencies = [
+  "cutadapt>=4.0",
+  "matplotlib>=3.7",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "PyYAML>=6.0",
+  "scikit-learn>=1.3",
+  "scipy>=1.11",
+]
+
+[project.scripts]
+metagal = "pipeline:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
