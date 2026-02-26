@@ -14,8 +14,12 @@ output_dir: results
 # Number of CPU threads available for tools that support parallelism
 threads: 4
 
+# Sequencing platform: illumina (paired-end) or nanopore (single-end)
+# Defaults to illumina if omitted.
+sequencing_platform: illumina
+
 # ── Samples ───────────────────────────────────────────────────────────────────
-# Option A – inline list
+# Illumina – Option A: inline list (r1 + r2 paired-end reads)
 samples:
   sample_01:
     r1: data/raw/sample_01_R1.fastq.gz
@@ -24,8 +28,19 @@ samples:
     r1: data/raw/sample_02_R1.fastq.gz
     r2: data/raw/sample_02_R2.fastq.gz
 
-# Option B – TSV manifest (comment out the inline list above and uncomment below)
+# Illumina – Option B: TSV manifest (comment out the inline list above and uncomment below)
 # samples: data/manifest.tsv   # columns: sample, r1, r2
+
+# Nanopore – Option A: inline list (single reads per sample)
+# sequencing_platform: nanopore
+# samples:
+#   sample_01:
+#     reads: data/raw/sample_01.fastq.gz
+#   sample_02:
+#     reads: data/raw/sample_02.fastq.gz
+
+# Nanopore – Option B: TSV manifest
+# samples: data/manifest_nanopore.tsv   # columns: sample, reads
 
 # ── Sample metadata ───────────────────────────────────────────────────────────
 # TSV file with sample identifiers as the first column.
@@ -45,7 +60,8 @@ steps:
   diversity: true
   visualisation: true
 
-# ── Primer trimming (cutadapt) ────────────────────────────────────────────────
+# ── Primer trimming ───────────────────────────────────────────────────────────
+# Illumina (cutadapt):
 trimming:
   # Built-in primer sets: 515F_806R (V4), 27F_338R (V1-V2), 341F_806R (V3-V4)
   primer_set: 515F_806R
@@ -58,10 +74,22 @@ trimming:
   error_rate: 0.1          # maximum allowed primer mismatch rate
   discard_untrimmed: true  # discard read pairs without detected primers
 
+# Nanopore (NanoFilt + optional cutadapt):
+# trimming:
+#   min_length: 200        # minimum read length to keep
+#   max_length: 2000       # maximum read length (omit for no upper limit)
+#   min_quality: 8.0       # minimum mean Phred quality score
+#   primer_set: 515F_806R  # optional: remove primers after NanoFilt
+
 # ── DADA2 denoising ───────────────────────────────────────────────────────────
+# Illumina (paired-end):
 dada2:
   trunc_len_f: 230   # truncate forward reads at this position
   trunc_len_r: 200   # truncate reverse reads at this position
+
+# Nanopore (single-end):
+# dada2:
+#   trunc_len: 0     # 0 = no truncation (recommended for Nanopore)
 
 # ── Taxonomic classification ──────────────────────────────────────────────────
 taxonomy:
