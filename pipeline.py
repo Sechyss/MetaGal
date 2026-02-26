@@ -2,15 +2,19 @@
 """
 MetaGal – 16S metabarcode analysis pipeline.
 
+Supports both Illumina paired-end and Nanopore MinION single-end data.
+Set ``sequencing_platform: nanopore`` in the configuration file to enable
+the Nanopore workflow.
+
 Usage
 -----
     python pipeline.py --config config/config.yaml
 
 The pipeline executes the following steps in order:
 
-1. Quality control  – FastQC + MultiQC on raw reads
-2. Primer trimming  – cutadapt
-3. Denoising        – DADA2 (Rscript)
+1. Quality control  – FastQC + MultiQC (+ NanoPlot for Nanopore)
+2. Trimming         – cutadapt (Illumina) or NanoFilt + cutadapt (Nanopore)
+3. Denoising        – DADA2 (paired-end for Illumina; single-end for Nanopore)
 4. Taxonomy         – VSEARCH or QIIME 2 sklearn classifier
 5. Diversity        – Alpha (Shannon, Simpson) and beta (Bray-Curtis) metrics
 6. Visualisation    – Alpha diversity plots, PCoA, relative abundance charts
@@ -27,8 +31,8 @@ from pathlib import Path
 import yaml
 
 from metagal.quality_control import quality_control
-from metagal.trimming import trim_samples
-from metagal.denoising import run_dada2, load_asv_table
+from metagal.trimming import trim_samples, trim_nanopore_samples
+from metagal.denoising import run_dada2, run_dada2_nanopore, load_asv_table
 from metagal.taxonomy import classify_vsearch, classify_qiime2, load_taxonomy, merge_taxonomy
 from metagal.diversity import alpha_diversity, bray_curtis_matrix, save_diversity_results
 from metagal.visualisation import (
@@ -122,6 +126,37 @@ def load_samples(samples_config: dict | str) -> dict[str, tuple[str, str]]:
     }
 
 
+def load_samples_nanopore(samples_config: dict | str) -> dict[str, str]:
+    """
+    Build a sample dictionary for Nanopore (single-end) data.
+
+    Accepts either:
+    - A dictionary mapping sample names to ``{reads: ...}``
+    - A path to a TSV file with columns: sample, reads
+
+    Parameters
+    ----------
+    samples_config : dict or str
+        Sample configuration from the YAML config.
+
+    Returns
+    -------
+    dict[str, str]
+        Mapping of sample name → reads path.
+    """
+    if isinstance(samples_config, str):
+        manifest = pd.read_csv(samples_config, sep="\t")
+        return {
+            row["sample"]: row["reads"]
+            for _, row in manifest.iterrows()
+        }
+
+    return {
+        name: info["reads"]
+        for name, info in samples_config.items()
+    }
+
+
 def run_pipeline(config: dict) -> None:
     """
     Execute the full MetaGal pipeline.
@@ -134,50 +169,85 @@ def run_pipeline(config: dict) -> None:
     log = logging.getLogger("metagal.pipeline")
     output_dir = config["output_dir"]
     threads = config.get("threads", 1)
+    platform = config.get("sequencing_platform", "illumina").lower()
 
     # ── 1. Load samples ──────────────────────────────────────────────────────
-    samples = load_samples(config["samples"])
-    log.info("Loaded %d sample(s)", len(samples))
+    if platform == "nanopore":
+        samples_np: dict[str, str] = load_samples_nanopore(config["samples"])
+        log.info("Loaded %d Nanopore sample(s)", len(samples_np))
+    else:
+        samples: dict[str, tuple[str, str]] = load_samples(config["samples"])
+        log.info("Loaded %d Illumina sample(s)", len(samples))
 
     # ── 2. Quality control ───────────────────────────────────────────────────
     if config.get("steps", {}).get("quality_control", True):
         log.info("=== Step 1: Quality Control ===")
-        all_reads = [f for r1, r2 in samples.values() for f in (r1, r2)]
+        if platform == "nanopore":
+            all_reads = list(samples_np.values())
+        else:
+            all_reads = [f for r1, r2 in samples.values() for f in (r1, r2)]
         quality_control(
             input_files=all_reads,
             output_dir=os.path.join(output_dir, "qc"),
             threads=threads,
+            platform=platform,
         )
 
-    # ── 3. Primer trimming ───────────────────────────────────────────────────
+    # ── 3. Primer trimming / read filtering ──────────────────────────────────
     if config.get("steps", {}).get("trimming", True):
-        log.info("=== Step 2: Primer Trimming ===")
+        log.info("=== Step 2: Trimming / Filtering ===")
         trimming_cfg = config.get("trimming", {})
-        trimmed = trim_samples(
-            samples=samples,
-            output_dir=os.path.join(output_dir, "trimmed"),
-            primer_set=trimming_cfg.get("primer_set", "515F_806R"),
-            forward_primer=trimming_cfg.get("forward_primer"),
-            reverse_primer=trimming_cfg.get("reverse_primer"),
-            min_length=trimming_cfg.get("min_length", 100),
-            error_rate=trimming_cfg.get("error_rate", 0.1),
-            discard_untrimmed=trimming_cfg.get("discard_untrimmed", True),
-            threads=threads,
-        )
+
+        if platform == "nanopore":
+            trimmed_np = trim_nanopore_samples(
+                samples=samples_np,
+                output_dir=os.path.join(output_dir, "trimmed"),
+                primer_set=trimming_cfg.get("primer_set"),
+                forward_primer=trimming_cfg.get("forward_primer"),
+                reverse_primer=trimming_cfg.get("reverse_primer"),
+                min_length=trimming_cfg.get("min_length", 200),
+                max_length=trimming_cfg.get("max_length"),
+                min_quality=trimming_cfg.get("min_quality", 8.0),
+                threads=threads,
+            )
+        else:
+            trimmed = trim_samples(
+                samples=samples,
+                output_dir=os.path.join(output_dir, "trimmed"),
+                primer_set=trimming_cfg.get("primer_set", "515F_806R"),
+                forward_primer=trimming_cfg.get("forward_primer"),
+                reverse_primer=trimming_cfg.get("reverse_primer"),
+                min_length=trimming_cfg.get("min_length", 100),
+                error_rate=trimming_cfg.get("error_rate", 0.1),
+                discard_untrimmed=trimming_cfg.get("discard_untrimmed", True),
+                threads=threads,
+            )
     else:
-        trimmed = samples
+        if platform == "nanopore":
+            trimmed_np = samples_np
+        else:
+            trimmed = samples
 
     # ── 4. Denoising (DADA2) ─────────────────────────────────────────────────
     if config.get("steps", {}).get("denoising", True):
         log.info("=== Step 3: Denoising (DADA2) ===")
         dada2_cfg = config.get("dada2", {})
-        asv_table_path, rep_seqs_path = run_dada2(
-            samples=trimmed,
-            output_dir=os.path.join(output_dir, "dada2"),
-            trunc_len_f=dada2_cfg.get("trunc_len_f", 230),
-            trunc_len_r=dada2_cfg.get("trunc_len_r", 200),
-            threads=threads,
-        )
+
+        if platform == "nanopore":
+            asv_table_path, rep_seqs_path = run_dada2_nanopore(
+                samples=trimmed_np,
+                output_dir=os.path.join(output_dir, "dada2"),
+                trunc_len=dada2_cfg.get("trunc_len", 0),
+                threads=threads,
+            )
+        else:
+            asv_table_path, rep_seqs_path = run_dada2(
+                samples=trimmed,
+                output_dir=os.path.join(output_dir, "dada2"),
+                trunc_len_f=dada2_cfg.get("trunc_len_f", 230),
+                trunc_len_r=dada2_cfg.get("trunc_len_r", 200),
+                threads=threads,
+            )
     else:
         asv_table_path = config["asv_table"]
         rep_seqs_path = config["rep_seqs"]

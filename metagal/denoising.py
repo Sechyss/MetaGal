@@ -2,7 +2,8 @@
 Denoising module for 16S metabarcode analysis.
 
 Wraps DADA2 (via an R subprocess) to learn error rates, denoise reads,
-merge paired-end reads, and remove chimeras, producing an ASV table.
+merge paired-end reads (Illumina), or process single-end long reads
+(Nanopore), and remove chimeras, producing an ASV table.
 """
 
 import json
@@ -162,6 +163,147 @@ def run_dada2(
     asv_table = os.path.join(output_dir, "asv_table.tsv")
     rep_seqs = os.path.join(output_dir, "rep_seqs.fasta")
     logger.info("DADA2 complete. ASV table: %s", asv_table)
+    return asv_table, rep_seqs
+
+
+# Inline R script for single-end Nanopore reads (no paired merging)
+_DADA2_NANOPORE_SCRIPT = textwrap.dedent("""\
+    library(dada2)
+    library(jsonlite)
+    library(Biostrings)
+
+    args        <- commandArgs(trailingOnly = TRUE)
+    input_json  <- args[1]
+    output_dir  <- args[2]
+    trunc_len   <- as.integer(args[3])   # 0 = no truncation
+    threads     <- as.integer(args[4])
+
+    params <- fromJSON(input_json)   # list: sample -> reads path
+    read_files   <- unlist(params)
+    sample_names <- names(params)
+
+    # Learn error rates from single-end reads
+    err <- learnErrors(read_files, multithread = threads)
+
+    # Dereplicate
+    derep <- derepFastq(read_files)
+    names(derep) <- sample_names
+
+    # Denoise (single-end – no merging step)
+    dada_out <- dada(derep, err = err, multithread = threads)
+
+    # Build sequence table
+    if (trunc_len > 0) {
+        seqtab <- makeSequenceTable(dada_out)
+        seqtab <- seqtab[, nchar(colnames(seqtab)) == trunc_len]
+    } else {
+        seqtab <- makeSequenceTable(dada_out)
+    }
+
+    # Remove chimeras
+    seqtab_nochim <- removeBimeraDenovo(
+        seqtab, method = "consensus", multithread = threads
+    )
+
+    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+    # Write ASV table (samples as rows, ASVs as columns)
+    asv_table_path <- file.path(output_dir, "asv_table.tsv")
+    write.table(
+        t(seqtab_nochim),
+        file = asv_table_path,
+        sep = "\\t",
+        quote = FALSE,
+        col.names = NA
+    )
+
+    # Write representative sequences (FASTA)
+    fasta_path <- file.path(output_dir, "rep_seqs.fasta")
+    seqs    <- colnames(seqtab_nochim)
+    asv_ids <- paste0("ASV", seq_along(seqs))
+    writeXStringSet(
+        DNAStringSet(setNames(seqs, asv_ids)),
+        filepath = fasta_path
+    )
+
+    # Write summary stats
+    stats <- data.frame(
+        sample  = sample_names,
+        input   = sapply(dada_out, function(x) sum(getUniques(x))),
+        nonchim = rowSums(seqtab_nochim)
+    )
+    write.table(stats,
+        file = file.path(output_dir, "dada2_stats.tsv"),
+        sep = "\\t", quote = FALSE, row.names = FALSE
+    )
+
+    message("DADA2 (Nanopore) complete. ASV table: ", asv_table_path)
+""")
+
+
+def run_dada2_nanopore(
+    samples: dict[str, str],
+    output_dir: str,
+    trunc_len: int = 0,
+    threads: int = 1,
+) -> tuple[str, str]:
+    """
+    Denoise single-end Nanopore 16S reads with DADA2 and remove chimeras.
+
+    This function runs DADA2 in single-end mode (no paired-end merging),
+    which is appropriate for long-read Nanopore amplicon data.
+
+    Parameters
+    ----------
+    samples : dict[str, str]
+        Dictionary mapping sample names to single-read (FASTQ) paths.
+    output_dir : str
+        Directory where DADA2 outputs will be written.
+    trunc_len : int
+        Truncate reads to exactly this length; ``0`` disables truncation
+        (recommended for variable-length Nanopore reads, default: 0).
+    threads : int
+        Number of threads for DADA2 (default: 1).
+
+    Returns
+    -------
+    tuple[str, str]
+        Paths to the ASV table TSV and representative sequences FASTA.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any input FASTQ file does not exist.
+    subprocess.CalledProcessError
+        If the R script exits with a non-zero return code.
+    """
+    for sample, reads in samples.items():
+        if not Path(reads).exists():
+            raise FileNotFoundError(f"Input file not found: {reads}")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    script_path = os.path.join(output_dir, "_dada2_nanopore_run.R")
+    with open(script_path, "w") as fh:
+        fh.write(_DADA2_NANOPORE_SCRIPT)
+
+    input_json = json.dumps({s: reads for s, reads in samples.items()})
+
+    cmd = [
+        "Rscript", script_path,
+        input_json,
+        output_dir,
+        str(trunc_len),
+        str(threads),
+    ]
+
+    logger.info("Running DADA2 (Nanopore) on %d sample(s)", len(samples))
+    logger.debug("Command: %s", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+    asv_table = os.path.join(output_dir, "asv_table.tsv")
+    rep_seqs = os.path.join(output_dir, "rep_seqs.fasta")
+    logger.info("DADA2 (Nanopore) complete. ASV table: %s", asv_table)
     return asv_table, rep_seqs
 
 
